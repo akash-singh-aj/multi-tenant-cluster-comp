@@ -1,25 +1,29 @@
 package com.flo.app;
 
-import com.flo.app.woker.Nmi300CsvReadWorker;
-import com.flo.app.woker.Nmi300PersistenceWorker;
+import akka.actor.typed.ActorSystem;
+import akka.actor.typed.Behavior;
+import akka.actor.typed.javadsl.Behaviors;
+import akka.cluster.typed.Cluster;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.flo.app.actor.WorkloadDistributor;
 
 public class Main {
-    static void main(String[] args) {
-        initApp();
-    }
+    private static final Logger log = LoggerFactory.getLogger(Main.class);
 
-    private static void initApp() {
-        System.out.println(String.format("starting mt cluster"));
-        // read properties and build the config
-        Nmi300CsvReadWorker.start();
+    public static void main(String[] args) {
+        Behavior<Void> rootBehavior = Behaviors.setup(context -> {
+            context.spawn(WorkloadDistributor.create(), "WorkloadDistributor");
+            return Behaviors.empty();
+        });
 
-        try {
-            Thread.sleep(1000);
-        } catch (Exception e) {
-            System.out.println("main " + e);
-        }
+        ActorSystem<Void> system = ActorSystem.create(rootBehavior, "ClusterSystem");
+        Cluster cluster = Cluster.get(system);
+        log.info("Starting mt cluster");
+        log.info("Akka Cluster started: {}", cluster.selfMember());
+        log.info(">>> Application started. Press Ctrl-C to exit. <<<");
 
-        Nmi300CsvReadWorker.shutdown();
-        Nmi300PersistenceWorker.shutdown();
+        // Add a shutdown hook to gracefully terminate the actor system
+        Runtime.getRuntime().addShutdownHook(new Thread(system::terminate));
     }
 }
