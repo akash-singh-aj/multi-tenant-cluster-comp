@@ -21,7 +21,9 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
     public interface Command {
     }
 
-    public record ProcessChunk(Path filePath, long start, long end) implements Command {}
+    public record ProcessChunk(Path filePath, long start,
+                               long end) implements Command {
+    }
 
     private final ActorRef<Nmi300PersistenceActor.Command> persistenceActor;
 
@@ -45,11 +47,6 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
         getContext().getLog().info("Processing chunk from {} to {} of file {}", command.start(), command.end(), command.filePath());
 
         try (RandomAccessFile raf = new RandomAccessFile(command.filePath().toFile(), "r")) {
-            String currentNmi = null;
-            if (command.start() > 0) {
-                currentNmi = findLastNmi(command.filePath(), command.start());
-            }
-
             raf.seek(command.start());
 
             // Limit input stream to the chunk size
@@ -60,17 +57,12 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
 
             String line;
             while ((line = reader.readLine()) != null) {
-                if (line.startsWith("200,")) {
+                if (line.startsWith("300,")) {
                     String[] parts = line.split(",");
                     if (parts.length > 1) {
-                        currentNmi = parts[1];
-                    }
-                } else if (line.startsWith("300,")) {
-                    String[] parts = line.split(",");
-                    if (parts.length > 1) {
-                        String nmiId = (currentNmi != null) ? currentNmi : parts[1];
                         Nmi300 nmi300 = new Nmi300();
-                        nmi300.setId(nmiId);
+                        nmi300.setId(parts[1]);
+                        nmi300.setData(line);
                         persistenceActor.tell(new Nmi300PersistenceActor.PersistNmi(nmi300, command.filePath().toString()));
                     }
                 }
@@ -83,39 +75,7 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
 
         return this;
     }
-
-    private String findLastNmi(Path filePath, long start) throws java.io.IOException {
-        try (RandomAccessFile raf = new RandomAccessFile(filePath.toFile(), "r")) {
-            long pos = start - 1;
-            while (pos >= 0) {
-                raf.seek(pos);
-                if (raf.read() == '\n') {
-                    // Possible start of a line. Check if it's a 200 record.
-                    String line = raf.readLine();
-                    if (line != null && line.startsWith("200,")) {
-                        String[] parts = line.split(",");
-                        if (parts.length > 1) {
-                            return parts[1];
-                        }
-                    }
-                    // After reading a line, seek back to before the line started to continue searching
-                    raf.seek(pos); 
-                }
-                pos--;
-            }
-            // Check first line of file
-            raf.seek(0);
-            String line = raf.readLine();
-            if (line != null && line.startsWith("200,")) {
-                String[] parts = line.split(",");
-                if (parts.length > 1) {
-                    return parts[1];
-                }
-            }
-        }
-        return null;
-    }
-
+    
     private static class BoundedInputStream extends InputStream {
         private final InputStream in;
         private long left;

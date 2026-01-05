@@ -3,6 +3,7 @@ package com.flo.app.data;
 public class Nmi300 {
 
     private String id;
+    private String data;
 
     public String getId() {
         return id;
@@ -10,5 +11,13 @@ public class Nmi300 {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getData() {
+        return data;
+    }
+
+    public void setData(String data) {
+        this.data = data;
     }
 }

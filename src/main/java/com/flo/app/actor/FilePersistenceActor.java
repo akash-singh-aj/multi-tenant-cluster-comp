@@ -42,7 +42,8 @@ public class FilePersistenceActor extends AbstractBehavior<FilePersistenceActor.
     }
 
     private Behavior<Command> onPersist(Persist command) {
-        String sql = String.format("INSERT INTO nmi300 (id) VALUES ('%s');\n", command.nmi300().getId());
+        String sql = String.format("INSERT INTO nmi300 (id, data) VALUES ('%s', '%s');\n", 
+                command.nmi300().getId(), command.nmi300().getData());
         writer.println(sql);
         InMemoryDataStore.addNmi300(command.nmi300());
         return this;
