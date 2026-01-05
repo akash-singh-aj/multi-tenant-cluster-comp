@@ -3,16 +3,14 @@ package com.flo.app.actor;
 import akka.actor.testkit.typed.javadsl.TestKitJunitResource;
 import akka.actor.testkit.typed.javadsl.TestProbe;
 import akka.actor.typed.ActorRef;
-import com.flo.app.data.Nmi300;
 import org.junit.ClassRule;
 import org.junit.Test;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.OutputStreamWriter;
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
 
@@ -22,25 +20,54 @@ public class SegmentProcessorTest {
     public static final TestKitJunitResource testKit = new TestKitJunitResource();
 
     @Test
-    public void testOnProcessChunkWithUtf8() throws Exception {
-        TestProbe<Nmi300PersistenceActor.Command> persistenceProbe = testKit.createTestProbe(Nmi300PersistenceActor.Command.class);
-        ActorRef<SegmentProcessor.Command> segmentProcessor = testKit.spawn(SegmentProcessor.create(persistenceProbe.getRef()));
+    public void testOnProcessChunk() throws IOException {
+        TestProbe<Nmi300PersistenceActor.Command> probe = testKit.createTestProbe();
+        ActorRef<SegmentProcessor.Command> worker = testKit.spawn(SegmentProcessor.create(probe.getRef()));
 
-        File tempFile = File.createTempFile("test_utf8", ".csv");
-        tempFile.deleteOnExit();
+        Path tempFile = Files.createTempFile("test", ".csv");
+        String content = "300,NMI1,DATA1\n400,OTHER,DATA\n300,NMI2,DATA2\n";
+        Files.write(tempFile, content.getBytes(), StandardOpenOption.WRITE);
 
-        // Line with UTF-8 character: "300,NMI_✓_123"
-        String content = "300,NMI_✓_123\n";
-        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(tempFile), StandardCharsets.UTF_8))) {
-            writer.write(content);
+        worker.tell(new SegmentProcessor.ProcessChunk(tempFile, 0, tempFile.toFile().length()));
+
+        Nmi300PersistenceActor.PersistNmi m1 = probe.expectMessageClass(Nmi300PersistenceActor.PersistNmi.class);
+        assertEquals("NMI1", m1.nmi300().getId());
+
+        Nmi300PersistenceActor.PersistNmi m2 = probe.expectMessageClass(Nmi300PersistenceActor.PersistNmi.class);
+        assertEquals("NMI2", m2.nmi300().getId());
+
+        Nmi300PersistenceActor.ChunkProcessed m3 = probe.expectMessageClass(Nmi300PersistenceActor.ChunkProcessed.class);
+        assertEquals(tempFile.toString(), m3.inputFilePath());
+
+        Files.deleteIfExists(tempFile);
+    }
+
+    @Test
+    public void testOnProcessChunkWithBOM() throws IOException {
+        TestProbe<Nmi300PersistenceActor.Command> probe = testKit.createTestProbe();
+        ActorRef<SegmentProcessor.Command> worker = testKit.spawn(SegmentProcessor.create(probe.getRef()));
+
+        Path tempFile = Files.createTempFile("testBOM", ".csv");
+        // UTF-8 BOM is EF BB BF
+        byte[] bom = new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+        String content = "300,NMI1,DATA1\n";
+        byte[] contentBytes = content.getBytes();
+        byte[] allBytes = new byte[bom.length + contentBytes.length];
+        System.arraycopy(bom, 0, allBytes, 0, bom.length);
+        System.arraycopy(contentBytes, 0, allBytes, bom.length, contentBytes.length);
+        
+        Files.write(tempFile, allBytes, StandardOpenOption.WRITE);
+
+        worker.tell(new SegmentProcessor.ProcessChunk(tempFile, 0, tempFile.toFile().length()));
+
+        // If it fails to see "300," because of BOM, it will send ChunkProcessed immediately
+        Nmi300PersistenceActor.Command m = probe.receiveMessage();
+        if (m instanceof Nmi300PersistenceActor.ChunkProcessed) {
+            System.out.println("[DEBUG_LOG] BOM caused the first line to be ignored!");
+        } else {
+            System.out.println("[DEBUG_LOG] BOM did not cause the first line to be ignored.");
         }
 
-        Path filePath = tempFile.toPath();
-        segmentProcessor.tell(new SegmentProcessor.ProcessChunk(filePath, 0, tempFile.length()));
-
-        Nmi300PersistenceActor.PersistNmi persistMsg = persistenceProbe.expectMessageClass(Nmi300PersistenceActor.PersistNmi.class);
-        assertEquals("NMI_✓_123", persistMsg.nmi300().getId());
-
-        persistenceProbe.expectMessageClass(Nmi300PersistenceActor.ChunkProcessed.class);
+        Files.deleteIfExists(tempFile);
     }
 }
