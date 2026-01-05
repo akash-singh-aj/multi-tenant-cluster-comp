@@ -43,6 +43,30 @@ public class SegmentProcessorTest {
     }
 
     @Test
+    public void testOnProcessChunkBoundary() throws IOException {
+        TestProbe<Nmi300PersistenceActor.Command> probe = testKit.createTestProbe();
+        ActorRef<SegmentProcessor.Command> worker = testKit.spawn(SegmentProcessor.create(probe.getRef()));
+
+        Path tempFile = Files.createTempFile("testBoundary", ".csv");
+        // Each line is 15 bytes including \n
+        String line1 = "300,NMI1,DATA1\n"; 
+        String line2 = "300,NMI2,DATA2\n";
+        Files.write(tempFile, (line1 + line2).getBytes(), StandardOpenOption.WRITE);
+
+        // Chunk 1: Exactly line 1
+        worker.tell(new SegmentProcessor.ProcessChunk(tempFile, 0, 15));
+        probe.expectMessageClass(Nmi300PersistenceActor.PersistNmi.class);
+        probe.expectMessageClass(Nmi300PersistenceActor.ChunkProcessed.class);
+
+        // Chunk 2: Exactly line 2
+        worker.tell(new SegmentProcessor.ProcessChunk(tempFile, 15, 30));
+        probe.expectMessageClass(Nmi300PersistenceActor.PersistNmi.class);
+        probe.expectMessageClass(Nmi300PersistenceActor.ChunkProcessed.class);
+
+        Files.deleteIfExists(tempFile);
+    }
+
+    @Test
     public void testOnProcessChunkWithBOM() throws IOException {
         TestProbe<Nmi300PersistenceActor.Command> probe = testKit.createTestProbe();
         ActorRef<SegmentProcessor.Command> worker = testKit.spawn(SegmentProcessor.create(probe.getRef()));
@@ -60,13 +84,9 @@ public class SegmentProcessorTest {
 
         worker.tell(new SegmentProcessor.ProcessChunk(tempFile, 0, tempFile.toFile().length()));
 
-        // If it fails to see "300," because of BOM, it will send ChunkProcessed immediately
-        Nmi300PersistenceActor.Command m = probe.receiveMessage();
-        if (m instanceof Nmi300PersistenceActor.ChunkProcessed) {
-            System.out.println("[DEBUG_LOG] BOM caused the first line to be ignored!");
-        } else {
-            System.out.println("[DEBUG_LOG] BOM did not cause the first line to be ignored.");
-        }
+        // Now it SHOULD see "300,"
+        probe.expectMessageClass(Nmi300PersistenceActor.PersistNmi.class);
+        probe.expectMessageClass(Nmi300PersistenceActor.ChunkProcessed.class);
 
         Files.deleteIfExists(tempFile);
     }

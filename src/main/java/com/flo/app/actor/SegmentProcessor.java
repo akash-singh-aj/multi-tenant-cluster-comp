@@ -51,23 +51,28 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
 
             // Limit input stream to the chunk size
             long length = command.end() - command.start();
-            InputStream is = Channels.newInputStream(raf.getChannel());
-            InputStream limitedIs = new BoundedInputStream(is, length);
-            BufferedReader reader = new BufferedReader(new InputStreamReader(limitedIs, StandardCharsets.UTF_8));
+            try (InputStream is = Channels.newInputStream(raf.getChannel());
+                 InputStream limitedIs = new BoundedInputStream(is, length);
+                 BufferedReader reader = new BufferedReader(new InputStreamReader(limitedIs, StandardCharsets.UTF_8))) {
 
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.startsWith("300,")) {
-                    String[] parts = line.split(",");
-                    if (parts.length > 1) {
-                        Nmi300 nmi300 = new Nmi300();
-                        nmi300.setId(parts[1]);
-                        nmi300.setData(line);
-                        persistenceActor.tell(new Nmi300PersistenceActor.PersistNmi(nmi300, command.filePath().toString()));
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    // Handle UTF-8 BOM if present at the start of the file
+                    if (line.startsWith("\uFEFF")) {
+                        line = line.substring(1);
+                    }
+                    if (line.startsWith("300,")) {
+                        String[] parts = line.split(",");
+                        if (parts.length > 1) {
+                            Nmi300 nmi300 = new Nmi300();
+                            nmi300.setId(parts[1]);
+                            nmi300.setData(line);
+                            persistenceActor.tell(new Nmi300PersistenceActor.PersistNmi(nmi300, command.filePath().toString()));
+                        }
                     }
                 }
+                persistenceActor.tell(new Nmi300PersistenceActor.ChunkProcessed(command.filePath().toString()));
             }
-            persistenceActor.tell(new Nmi300PersistenceActor.ChunkProcessed(command.filePath().toString()));
         } catch (Exception e) {
             getContext().getLog().error("Failed to process chunk of file {}", command.filePath(), e);
             persistenceActor.tell(new Nmi300PersistenceActor.ChunkFailed(command.filePath().toString(), e));
@@ -75,7 +80,7 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
 
         return this;
     }
-    
+
     private static class BoundedInputStream extends InputStream {
         private final InputStream in;
         private long left;
@@ -95,10 +100,16 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
 
         @Override
         public int read(byte[] b, int off, int len) throws java.io.IOException {
+            if (len == 0) return 0;
             if (left <= 0) return -1;
             int result = in.read(b, off, (int) Math.min(len, left));
             if (result != -1) left -= result;
             return result;
+        }
+
+        @Override
+        public void close() throws java.io.IOException {
+            in.close();
         }
     }
 }
