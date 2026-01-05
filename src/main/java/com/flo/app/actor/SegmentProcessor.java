@@ -8,7 +8,12 @@ import akka.actor.typed.javadsl.Behaviors;
 import akka.actor.typed.javadsl.Receive;
 import com.flo.app.data.Nmi300;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
+import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
 public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command> {
@@ -17,10 +22,6 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
     }
 
     public record ProcessChunk(Path filePath, long start, long end) implements Command {}
-
-    private record ProcessChunkWithRetry(ProcessChunk originalCommand, int retries) implements Command {}
-
-    private static final int MAX_RETRIES = 3;
 
     private final ActorRef<Nmi300PersistenceActor.Command> persistenceActor;
 
@@ -36,43 +37,108 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
     @Override
     public Receive<Command> createReceive() {
         return newReceiveBuilder()
-                .onMessage(ProcessChunk.class, command -> onProcessChunk(new ProcessChunkWithRetry(command, 0)))
-                .onMessage(ProcessChunkWithRetry.class, this::onProcessChunk)
+                .onMessage(ProcessChunk.class, this::onProcessChunk)
                 .build();
     }
 
-    private Behavior<Command> onProcessChunk(ProcessChunkWithRetry command) {
-        ProcessChunk originalCommand = command.originalCommand();
-        getContext().getLog().info("Processing chunk from {} to {} of file {}", originalCommand.start(), originalCommand.end(), originalCommand.filePath());
+    private Behavior<Command> onProcessChunk(ProcessChunk command) {
+        getContext().getLog().info("Processing chunk from {} to {} of file {}", command.start(), command.end(), command.filePath());
 
-        try (RandomAccessFile file = new RandomAccessFile(originalCommand.filePath().toFile(), "r")) {
-            file.seek(originalCommand.start());
-            long currentPos = originalCommand.start();
+        try (RandomAccessFile raf = new RandomAccessFile(command.filePath().toFile(), "r")) {
+            String currentNmi = null;
+            if (command.start() > 0) {
+                currentNmi = findLastNmi(command.filePath(), command.start());
+            }
 
-            while (currentPos < originalCommand.end()) {
-                String line = file.readLine();
-                if (line == null) break;
-                currentPos = file.getFilePointer();
+            raf.seek(command.start());
 
-                if (line.startsWith("300")) {
+            // Limit input stream to the chunk size
+            long length = command.end() - command.start();
+            InputStream is = Channels.newInputStream(raf.getChannel());
+            InputStream limitedIs = new BoundedInputStream(is, length);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(limitedIs, StandardCharsets.UTF_8));
+
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith("200,")) {
                     String[] parts = line.split(",");
                     if (parts.length > 1) {
+                        currentNmi = parts[1];
+                    }
+                } else if (line.startsWith("300,")) {
+                    String[] parts = line.split(",");
+                    if (parts.length > 1) {
+                        String nmiId = (currentNmi != null) ? currentNmi : parts[1];
                         Nmi300 nmi300 = new Nmi300();
-                        nmi300.setId(parts[1]);
-                        persistenceActor.tell(new Nmi300PersistenceActor.PersistNmi(nmi300, originalCommand.filePath().toString()));
+                        nmi300.setId(nmiId);
+                        persistenceActor.tell(new Nmi300PersistenceActor.PersistNmi(nmi300, command.filePath().toString()));
                     }
                 }
             }
-            persistenceActor.tell(new Nmi300PersistenceActor.ChunkProcessed(originalCommand.filePath().toString()));
+            persistenceActor.tell(new Nmi300PersistenceActor.ChunkProcessed(command.filePath().toString()));
         } catch (Exception e) {
-            getContext().getLog().error("Failed to process chunk after {} retries", command.retries(), e);
-            if (command.retries() < MAX_RETRIES) {
-                getContext().getSelf().tell(new ProcessChunkWithRetry(originalCommand, command.retries() + 1));
-            } else {
-                persistenceActor.tell(new Nmi300PersistenceActor.ChunkFailed(originalCommand.filePath().toString(), e));
-            }
+            getContext().getLog().error("Failed to process chunk of file {}", command.filePath(), e);
+            persistenceActor.tell(new Nmi300PersistenceActor.ChunkFailed(command.filePath().toString(), e));
         }
 
         return this;
+    }
+
+    private String findLastNmi(Path filePath, long start) throws java.io.IOException {
+        try (RandomAccessFile raf = new RandomAccessFile(filePath.toFile(), "r")) {
+            long pos = start - 1;
+            while (pos >= 0) {
+                raf.seek(pos);
+                if (raf.read() == '\n') {
+                    // Possible start of a line. Check if it's a 200 record.
+                    String line = raf.readLine();
+                    if (line != null && line.startsWith("200,")) {
+                        String[] parts = line.split(",");
+                        if (parts.length > 1) {
+                            return parts[1];
+                        }
+                    }
+                    // After reading a line, seek back to before the line started to continue searching
+                    raf.seek(pos); 
+                }
+                pos--;
+            }
+            // Check first line of file
+            raf.seek(0);
+            String line = raf.readLine();
+            if (line != null && line.startsWith("200,")) {
+                String[] parts = line.split(",");
+                if (parts.length > 1) {
+                    return parts[1];
+                }
+            }
+        }
+        return null;
+    }
+
+    private static class BoundedInputStream extends InputStream {
+        private final InputStream in;
+        private long left;
+
+        public BoundedInputStream(InputStream in, long limit) {
+            this.in = in;
+            this.left = limit;
+        }
+
+        @Override
+        public int read() throws java.io.IOException {
+            if (left <= 0) return -1;
+            int result = in.read();
+            if (result != -1) left--;
+            return result;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws java.io.IOException {
+            if (left <= 0) return -1;
+            int result = in.read(b, off, (int) Math.min(len, left));
+            if (result != -1) left -= result;
+            return result;
+        }
     }
 }
