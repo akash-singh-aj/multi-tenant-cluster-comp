@@ -51,17 +51,19 @@ public class Nmi300PersistenceActor extends AbstractBehavior<Nmi300PersistenceAc
     private final StashBuffer<Command> stashBuffer;
 
     public static Behavior<Command> create(ActorRef<WorkloadDistributor.Command> workloadDistributor) {
-        return Behaviors.withStash(100, stash ->
+        return Behaviors.withStash(1000, stash ->
                 Behaviors.setup(context -> new Nmi300PersistenceActor(context, workloadDistributor, stash)));
     }
 
-    private Nmi300PersistenceActor(ActorContext<Command> context, ActorRef<WorkloadDistributor.Command> workloadDistributor, StashBuffer<Command> stashBuffer) {
+    private Nmi300PersistenceActor(ActorContext<Command> context, ActorRef<WorkloadDistributor.Command> workloadDistributor, StashBuffer<Command> stashBuffer) throws IOException {
         super(context);
         this.workloadDistributor = workloadDistributor;
         this.stashBuffer = stashBuffer;
         Config config = context.getSystem().settings().config().getConfig("file-processing");
         this.outputDir = Paths.get(config.getString("output-dir"));
         this.errorDir = Paths.get(config.getString("error-dir"));
+        Files.createDirectories(this.outputDir);
+        Files.createDirectories(this.errorDir);
     }
 
     @Override
@@ -79,14 +81,17 @@ public class Nmi300PersistenceActor extends AbstractBehavior<Nmi300PersistenceAc
     }
 
     private Behavior<Command> creating(String inputFilePath) {
-        // This is now a dedicated state for creating the actor.
-        // The blocking spawn call is isolated here.
-        String outputFileName = Paths.get(inputFilePath).getFileName().toString().replace(".processing", "") + ".sql";
+        String outputFileName = Paths.get(inputFilePath).getFileName().toString().replaceAll("\\.processing$", "") + ".sql";
         Path outputPath = outputDir.resolve(outputFileName);
-        ActorRef<FilePersistenceActor.Command> newWriterActor = getContext().spawn(FilePersistenceActor.create(outputPath), "file-writer-" + outputFileName);
-        fileWriters.put(inputFilePath, newWriterActor);
-
-        // After spawning, unstash all messages and return to the idle state.
+        try {
+            ActorRef<FilePersistenceActor.Command> newWriterActor = getContext().spawn(
+                    FilePersistenceActor.create(outputPath), "file-writer-" + outputFileName);
+            fileWriters.put(inputFilePath, newWriterActor);
+        } catch (Exception e) {
+            getContext().getLog().error("Failed to spawn FilePersistenceActor for {}, dropping stashed messages", inputFilePath, e);
+            stashBuffer.unstashAll(idle());
+            return idle();
+        }
         return stashBuffer.unstashAll(idle());
     }
 
@@ -146,7 +151,7 @@ public class Nmi300PersistenceActor extends AbstractBehavior<Nmi300PersistenceAc
         // Move to error directory
         try {
             Path processingFile = Paths.get(command.inputFilePath());
-            String originalFileName = processingFile.getFileName().toString().replace(".processing", "");
+            String originalFileName = processingFile.getFileName().toString().replaceAll("\\.processing$", "");
             Path target = errorDir.resolve(originalFileName);
             Files.move(processingFile, target, StandardCopyOption.ATOMIC_MOVE);
             getContext().getLog().info("Moved failed file {} to {}", processingFile, target);

@@ -42,15 +42,19 @@ public class FilePersistenceActor extends AbstractBehavior<FilePersistenceActor.
     }
 
     private Behavior<Command> onPersist(Persist command) {
-        String sql = String.format("INSERT INTO nmi300 (id, data) VALUES ('%s', '%s');\n", 
-                command.nmi300().getId(), command.nmi300().getData());
-        writer.println(sql);
+        String id = command.nmi300().getId().replace("'", "''");
+        String data = command.nmi300().getData().replace("'", "''");
+        String sql = String.format("INSERT INTO nmi300 (id, data) VALUES ('%s', '%s');\n", id, data);
+        writer.print(sql);
+        getContext().getLog().debug("Persisted NMI record id={}", command.nmi300().getId());
         InMemoryDataStore.addNmi300(command.nmi300());
         return this;
     }
 
     private Behavior<Command> onClose(Close command) {
+        writer.flush();
         writer.close();
+        getContext().getLog().info("Closed output file");
         return Behaviors.stopped();
     }
 }

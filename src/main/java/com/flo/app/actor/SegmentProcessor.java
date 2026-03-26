@@ -63,7 +63,7 @@ public class SegmentProcessor extends AbstractBehavior<SegmentProcessor.Command>
                     }
                     if (line.startsWith("300,")) {
                         String[] parts = line.split(",");
-                        if (parts.length > 1) {
+                        if (parts.length > 1 && !parts[1].isEmpty()) {
                             Nmi300 nmi300 = new Nmi300();
                             nmi300.setId(parts[1]);
                             nmi300.setData(line);

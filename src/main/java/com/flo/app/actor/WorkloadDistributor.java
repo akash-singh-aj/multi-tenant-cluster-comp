@@ -58,12 +58,14 @@ public class WorkloadDistributor extends AbstractBehavior<WorkloadDistributor.Co
         return Behaviors.withTimers(timers -> Behaviors.setup(context -> new WorkloadDistributor(context, timers)));
     }
 
-    private WorkloadDistributor(ActorContext<Command> context, TimerScheduler<Command> timers) {
+    private WorkloadDistributor(ActorContext<Command> context, TimerScheduler<Command> timers) throws IOException {
         super(context);
         this.timers = timers;
         Config config = context.getSystem().settings().config().getConfig("file-processing");
         this.inputDir = Paths.get(config.getString("input-dir"));
         this.processedDir = Paths.get(config.getString("processed-dir"));
+        Files.createDirectories(this.inputDir);
+        Files.createDirectories(this.processedDir);
         this.chunkSize = config.getLong("chunk-size-mb") * 1024 * 1024;
 
         ActorRef<MemberEvent> memberEventAdapter = context.messageAdapter(MemberEvent.class, AdaptedMemberEvent::new);
@@ -124,7 +126,7 @@ public class WorkloadDistributor extends AbstractBehavior<WorkloadDistributor.Co
 
     private Behavior<Command> onFileProcessed(FileProcessed command) {
         Path processingFile = command.filePath();
-        String originalFileName = processingFile.getFileName().toString().replace(".processing", "");
+        String originalFileName = processingFile.getFileName().toString().replaceAll("\\.processing$", "");
         try {
             Path target = processedDir.resolve(originalFileName);
             Files.move(processingFile, target, StandardCopyOption.ATOMIC_MOVE);
@@ -176,7 +178,7 @@ public class WorkloadDistributor extends AbstractBehavior<WorkloadDistributor.Co
             stream.filter(path -> path.toString().endsWith(".processing"))
                     .forEach(processingFile -> {
                         try {
-                            String originalFileName = processingFile.getFileName().toString().replace(".processing", "");
+                            String originalFileName = processingFile.getFileName().toString().replaceAll("\\.processing$", "");
                             Path originalFile = processingFile.resolveSibling(originalFileName);
                             Files.move(processingFile, originalFile, StandardCopyOption.ATOMIC_MOVE);
                             getContext().getLog().info("Retrying processing for file: {}", originalFile);

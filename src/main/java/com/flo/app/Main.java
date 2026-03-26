@@ -23,7 +23,10 @@ public class Main {
         log.info("Akka Cluster started: {}", cluster.selfMember());
         log.info(">>> Application started. Press Ctrl-C to exit. <<<");
 
-        // Add a shutdown hook to gracefully terminate the actor system
-        Runtime.getRuntime().addShutdownHook(new Thread(system::terminate));
+        // Add a shutdown hook to gracefully terminate the actor system and wait for completion
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            system.terminate();
+            system.getWhenTerminated().toCompletableFuture().join();
+        }));
     }
 }
